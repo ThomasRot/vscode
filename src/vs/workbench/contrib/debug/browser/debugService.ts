@@ -396,11 +396,9 @@ export class DebugService implements IDebugService {
 					options = { ...options, compoundRoot: new DebugCompoundRoot() };
 				}
 
-				const values = await Promise.all(compound.configurations.map(configData => {
+				let launchNames = compound.configurations.map(configData => {
 					const name = typeof configData === 'string' ? configData : configData.name;
-					if (name === compound.name) {
-						return Promise.resolve(false);
-					}
+
 
 					let launchForName: ILaunch | undefined;
 					if (typeof configData === 'string') {
@@ -422,10 +420,54 @@ export class DebugService implements IDebugService {
 							throw new Error(nls.localize('noFolderWithName', "Can not find folder with name '{0}' for configuration '{1}' in compound '{2}'.", configData.folder, configData.name, compound.name));
 						}
 					}
+					return {
+						launchForName,
+						name,
+						config: launchForName!.getConfiguration(name),
+					};
+				});
 
-					return this.createSession(launchForName, launchForName!.getConfiguration(name), options);
-				}));
+				const [launchNamesWithStartedSessions, launchNamesWithoutStartedSessions] = launchNames.reduce<[typeof launchNames, typeof launchNames]>(
+					([satisfied, unsatisfied], item) => {
+						const { launchForName: _launchForName, name, config } = item;
+						if (
+							options?.startedByUser &&
+							this.model.getSessions().some(s => s.getLabel() === name) &&
+							config?.suppressMultipleSessionWarning !== true
+						) {
+							satisfied.push(item);
+						} else {
+							unsatisfied.push(item);
+						}
+						return [satisfied, unsatisfied];
+					},
+					[[], []]
+				);
 
+				if (launchNamesWithStartedSessions.length > 0) {
+					// There are already sessions with the same name, so we prompt the user like in #127721
+					const result = await this.dialogService.confirm({
+						message: nls.localize('multipleSessionCompound', "'{0}' are already running. Do you want to start another instance for each?", launchNamesWithStartedSessions.map((item) => item.name).join(', '))
+					});
+					launchNames = result.confirmed
+						? launchNames.map(launchName => ({
+							...launchName,
+							config: launchName.config
+								// if confirmed no need to show dialog for each service individually
+								? { ...launchName.config, suppressMultipleSessionWarning: true }
+								: launchName.config,
+						}))
+						: launchNamesWithoutStartedSessions;
+				}
+
+				const values = await Promise.all(
+					launchNames.map(({ launchForName, name, config }) => {
+						if (name === compound.name) {
+							return Promise.resolve(false);
+						}
+						return this.createSession(launchForName, config, options);
+					})
+				);
 				const result = values.every(success => !!success); // Compound launch is a success only if each configuration launched successfully
 				this.endInitializingState();
 				return result;
